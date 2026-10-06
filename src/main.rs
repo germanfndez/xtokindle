@@ -5,6 +5,9 @@ use clap::Parser;
 mod article;
 // Wired into the CLI in T7.
 #[allow(dead_code)]
+mod render;
+// Wired into the CLI in T7.
+#[allow(dead_code)]
 mod source;
 // Wired into the CLI in T7.
 #[allow(dead_code)]
