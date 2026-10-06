@@ -73,7 +73,13 @@ pub struct SmtpSender {
 
 impl SmtpSender {
     /// Prepares the SMTP connection settings. Nothing is sent until `send` is called.
-    pub fn new(smtp: &SmtpConfig, kindle_email: &str) -> Result<SmtpSender, SendError> {
+    ///
+    /// `password` is the already resolved SMTP password (see `config::resolve_password`).
+    pub fn new(
+        smtp: &SmtpConfig,
+        password: &str,
+        kindle_email: &str,
+    ) -> Result<SmtpSender, SendError> {
         let builder = match smtp.security {
             Security::Tls => SmtpTransport::relay(&smtp.host),
             Security::StartTls => SmtpTransport::starttls_relay(&smtp.host),
@@ -85,7 +91,7 @@ impl SmtpSender {
             .port(smtp.port)
             .credentials(Credentials::new(
                 smtp.username.clone(),
-                smtp.password.clone(),
+                password.to_string(),
             ))
             .timeout(Some(Duration::from_secs(30)))
             .build();
@@ -111,6 +117,7 @@ impl Sender for SmtpSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PasswordSource;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -214,12 +221,12 @@ mod tests {
             host: "127.0.0.1".into(),
             port,
             username: "me@example.com".into(),
-            password: "secret".into(),
+            password: PasswordSource::Plain("secret".into()),
             from: "me@example.com".into(),
             security: Security::None,
         };
 
-        let sender = SmtpSender::new(&smtp, "you_abc@kindle.com").unwrap();
+        let sender = SmtpSender::new(&smtp, "secret", "you_abc@kindle.com").unwrap();
         sender.send(&document()).unwrap();
 
         let received = server.join().unwrap();
@@ -240,12 +247,12 @@ mod tests {
             host: "127.0.0.1".into(),
             port,
             username: "me@example.com".into(),
-            password: "secret".into(),
+            password: PasswordSource::Plain("secret".into()),
             from: "me@example.com".into(),
             security: Security::None,
         };
 
-        let result = SmtpSender::new(&smtp, "you_abc@kindle.com")
+        let result = SmtpSender::new(&smtp, "secret", "you_abc@kindle.com")
             .unwrap()
             .send(&document());
 
