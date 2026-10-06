@@ -1,5 +1,12 @@
 use clap::Parser;
 
+// Wired into the CLI in T7.
+#[allow(dead_code)]
+mod article;
+// Wired into the CLI in T7.
+#[allow(dead_code)]
+mod source;
+
 /// Send long-form articles (starting with X Articles) to your Kindle.
 #[derive(Parser, Debug)]
 #[command(name = "x2k", version, about)]
