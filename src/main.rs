@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use x2k::app::{self, AppError, Options};
+use x2k::init;
 
 /// Exit codes shown at the end of `--help`.
 const EXIT_CODES: &str = "\
@@ -48,10 +49,16 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match (cli.command, cli.url) {
-        (Some(Command::Init), _) => {
-            eprintln!("x2k init is not available yet");
-            ExitCode::from(1)
-        }
+        (Some(Command::Init), _) => match init::run() {
+            Ok(message) => {
+                println!("{message}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::from(error.exit_code() as u8)
+            }
+        },
         (None, Some(url)) => {
             let options = Options {
                 dry_run: cli.dry_run,

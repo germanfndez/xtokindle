@@ -5,6 +5,7 @@
 pub mod app;
 pub mod article;
 pub mod config;
+pub mod init;
 pub mod render;
 pub mod sender;
 pub mod source;
