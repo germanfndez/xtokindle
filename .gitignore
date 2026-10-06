@@ -1,0 +1,5 @@
+/target
+
+# Local workflow/tooling files (not published)
+/odd/
+/.atl/
