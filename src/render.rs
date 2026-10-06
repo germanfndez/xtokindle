@@ -9,6 +9,7 @@ use std::time::Duration;
 use epub_builder::{EpubBuilder, EpubContent, ZipLibrary};
 
 use crate::article::{Article, Block, Span};
+use crate::cover::make_kindle_cover;
 
 /// Minimal, Kindle-friendly stylesheet.
 const CSS: &str = "body { line-height: 1.4; }\n\
@@ -236,6 +237,18 @@ pub fn render_epub(
     build_epub(article, images).map_err(|e| RenderError::Epub(e.to_string()))
 }
 
+/// The image to embed as the cover: a Kindle-friendly portrait version when
+/// possible, otherwise the original.
+fn cover_for_epub(image: &Image) -> Image {
+    match make_kindle_cover(&image.bytes) {
+        Some(jpeg) => Image {
+            bytes: jpeg,
+            mime: "image/jpeg".into(),
+        },
+        None => image.clone(),
+    }
+}
+
 fn build_epub(article: &Article, images: &HashMap<String, Image>) -> epub_builder::Result<Vec<u8>> {
     let mut builder = EpubBuilder::new(ZipLibrary::new()?)?;
     builder.metadata("title", article.title.as_str())?;
@@ -249,8 +262,15 @@ fn build_epub(article: &Article, images: &HashMap<String, Image>) -> epub_builde
         let Some(image) = images.get(url) else {
             continue;
         };
-        let path = format!("images/img-{index}.{}", extension_for(&image.mime));
         let is_cover = article.cover_image.as_ref() == Some(url);
+        let cover;
+        let image = if is_cover {
+            cover = cover_for_epub(image);
+            &cover
+        } else {
+            image
+        };
+        let path = format!("images/img-{index}.{}", extension_for(&image.mime));
         if is_cover {
             builder.add_cover_image(&path, image.bytes.as_slice(), image.mime.as_str())?;
         } else {
@@ -502,6 +522,52 @@ mod tests {
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("images/img-0.jpg"));
         assert!(text.contains("images/img-1.png"));
+    }
+
+    /// A PNG of the given size, as downloaded bytes.
+    fn png_image(width: u32, height: u32) -> Image {
+        let img = image::RgbImage::from_pixel(width, height, image::Rgb([9, 9, 9]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        Image {
+            bytes: out.into_inner(),
+            mime: "image/png".into(),
+        }
+    }
+
+    #[test]
+    fn wide_cover_becomes_a_portrait_jpeg() {
+        let cover = cover_for_epub(&png_image(1920, 768));
+
+        assert_eq!(cover.mime, "image/jpeg");
+        let decoded = image::load_from_memory(&cover.bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (1600, 2560));
+    }
+
+    #[test]
+    fn portrait_or_broken_cover_is_kept_as_is() {
+        let portrait = png_image(800, 1280);
+        assert_eq!(cover_for_epub(&portrait), portrait);
+
+        let broken = Image {
+            bytes: vec![1, 2, 3],
+            mime: "image/jpeg".into(),
+        };
+        assert_eq!(cover_for_epub(&broken), broken);
+    }
+
+    #[test]
+    fn epub_cover_of_a_wide_png_gets_a_jpg_path() {
+        let mut a = article(vec![para("Hi")]);
+        a.cover_image = Some("https://i/wide.png".into());
+        let mut images = HashMap::new();
+        images.insert("https://i/wide.png".to_string(), png_image(1920, 768));
+
+        let bytes = render_epub(&a, &images).unwrap();
+
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("images/img-0.jpg"));
+        assert!(!text.contains("images/img-0.png"));
     }
 
     #[test]
