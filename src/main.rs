@@ -6,6 +6,9 @@ mod article;
 // Wired into the CLI in T7.
 #[allow(dead_code)]
 mod source;
+// Wired into the CLI in T7.
+#[allow(dead_code)]
+mod sources;
 
 /// Send long-form articles (starting with X Articles) to your Kindle.
 #[derive(Parser, Debug)]
