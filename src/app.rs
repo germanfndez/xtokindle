@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::config::{Config, ConfigError, default_config_path};
+use crate::config::{
+    Config, ConfigError, default_config_path, resolve_password, run_shell_command,
+};
 use crate::render::{
     Image, RenderError, collect_image_urls, download_images, file_name, render_epub,
 };
@@ -127,8 +129,10 @@ pub fn default_registry() -> SourceRegistry {
 
 /// The real run: real sources, real image downloads and, unless `--dry-run`, real SMTP.
 ///
-/// In the normal flow the URL is checked and the config is loaded first, so an
-/// unsupported URL or a missing config fails fast, before any network request.
+/// In the normal flow the URL is checked, the config is loaded and the SMTP password
+/// is resolved first (this may run `password_command`), so an unsupported URL, a missing
+/// config or a failing password command fails fast, before any network request.
+/// `--dry-run` never resolves the password.
 pub fn run(url: &str, options: &Options) -> Result<Outcome, AppError> {
     let registry = default_registry();
     registry.find(url)?;
@@ -140,7 +144,9 @@ pub fn run(url: &str, options: &Options) -> Result<Outcome, AppError> {
         ConfigError::Read("cannot locate the config file: set X2K_CONFIG or HOME".to_string())
     })?;
     let config = Config::load(&path)?;
-    let sender = SmtpSender::new(&config.smtp, &config.kindle_email)?;
+    // Fail fast: a password manager that is locked should not cost a fetch.
+    let password = resolve_password(&config.smtp.password, run_shell_command)?;
+    let sender = SmtpSender::new(&config.smtp, &password, &config.kindle_email)?;
     let delivery = Delivery {
         sender: &sender,
         kindle_email: &config.kindle_email,
@@ -437,6 +443,7 @@ mod tests {
             ),
             (SourceError::Parse("p".into()).into(), "parse", 4),
             (ConfigError::Invalid("c".into()).into(), "config", 5),
+            (ConfigError::PasswordCommand("p".into()).into(), "config", 5),
             (SendError::Build("s".into()).into(), "send", 6),
             (RenderError::Epub("r".into()).into(), "render", 1),
             (AppError::Io("i".into()), "io", 1),

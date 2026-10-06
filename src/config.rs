@@ -18,6 +18,8 @@ pub enum ConfigError {
     Parse(String),
     #[error("invalid config: {0}")]
     Invalid(String),
+    #[error("{0}")]
+    PasswordCommand(String),
 }
 
 /// How to secure the SMTP connection.
@@ -32,13 +34,25 @@ pub enum Security {
     None,
 }
 
+/// Where the SMTP password comes from. Serialized as `password` or `password_command`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum PasswordSource {
+    /// The password itself (from `X2K_SMTP_PASSWORD` or the `password` key).
+    #[serde(rename = "password")]
+    Plain(String),
+    /// A shell command that prints the password (the `password_command` key).
+    #[serde(rename = "password_command")]
+    Command(String),
+}
+
 /// SMTP server settings, with every default already filled in.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SmtpConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub password: String,
+    #[serde(flatten)]
+    pub password: PasswordSource,
     pub from: String,
     pub security: Security,
 }
@@ -63,6 +77,7 @@ struct RawSmtp {
     port: u16,
     username: String,
     password: Option<String>,
+    password_command: Option<String>,
     from: Option<String>,
     security: Option<Security>,
 }
@@ -113,10 +128,22 @@ impl Config {
     pub fn from_toml_str(text: &str, env_password: Option<String>) -> Result<Config, ConfigError> {
         let raw: RawConfig = toml::from_str(text).map_err(|e| ConfigError::Parse(e.to_string()))?;
 
-        let password = env_password
-            .filter(|password| !password.is_empty())
-            .or(raw.smtp.password)
-            .unwrap_or_default();
+        if raw.smtp.password.is_some() && raw.smtp.password_command.is_some() {
+            return Err(ConfigError::Invalid(
+                "set only one of `password` and `password_command` in [smtp], not both".to_string(),
+            ));
+        }
+        // Precedence: environment variable, then `password`, then `password_command`.
+        let password = match (
+            env_password.filter(|password| !password.is_empty()),
+            raw.smtp.password,
+            raw.smtp.password_command,
+        ) {
+            (Some(env), _, _) => PasswordSource::Plain(env),
+            (None, Some(password), _) => PasswordSource::Plain(password),
+            (None, None, Some(command)) => PasswordSource::Command(command),
+            (None, None, None) => PasswordSource::Plain(String::new()),
+        };
         let security = raw.smtp.security.unwrap_or(if raw.smtp.port == 465 {
             Security::Tls
         } else {
@@ -152,10 +179,16 @@ impl Config {
         if !looks_like_email(&self.smtp.from) {
             return invalid("smtp.from must be an email address");
         }
-        if self.smtp.password.is_empty() {
-            return invalid(&format!(
-                "smtp password is missing: set `password` in the file or {PASSWORD_ENV}"
-            ));
+        match &self.smtp.password {
+            PasswordSource::Plain(password) if password.is_empty() => {
+                return invalid(&format!(
+                    "smtp password is missing: set `password` or `password_command` in the file, or {PASSWORD_ENV}"
+                ));
+            }
+            PasswordSource::Command(command) if command.trim().is_empty() => {
+                return invalid("smtp.password_command must not be empty");
+            }
+            _ => {}
         }
         if self.smtp.port == 0 {
             return invalid("smtp.port must be greater than 0");
@@ -178,6 +211,59 @@ impl Config {
         }
         write_private(path, &text).map_err(read_error)
     }
+}
+
+/// Hint appended to every password command failure.
+const PASSWORD_MANAGER_HINT: &str = "If you use a password manager CLI, make sure it is unlocked (e.g. `bw unlock` and export BW_SESSION)";
+
+/// How many characters of the command's stderr go into an error message.
+const STDERR_LIMIT: usize = 300;
+
+/// Gets the actual password. `run` executes a shell command and returns its stdout,
+/// or the reason it failed (injected so tests need no real commands).
+///
+/// Only trailing `\r`/`\n` are trimmed: app passwords may contain spaces.
+pub fn resolve_password(
+    source: &PasswordSource,
+    run: impl Fn(&str) -> Result<String, String>,
+) -> Result<String, ConfigError> {
+    let command = match source {
+        PasswordSource::Plain(password) => return Ok(password.clone()),
+        PasswordSource::Command(command) => command,
+    };
+    let fail = |reason: &str| {
+        ConfigError::PasswordCommand(format!(
+            "password_command `{command}` failed: {reason}. {PASSWORD_MANAGER_HINT}"
+        ))
+    };
+
+    let output = run(command).map_err(|reason| fail(&reason))?;
+    let password = output.trim_end_matches(['\r', '\n']);
+    if password.is_empty() {
+        return Err(fail("it printed nothing"));
+    }
+    Ok(password.to_string())
+}
+
+/// Runs `command` with `sh -c`, without stdin. Returns its stdout.
+///
+/// The error says why it failed (exit status and a short piece of stderr).
+/// It never contains stdout, because stdout may hold the password.
+pub fn run_shell_command(command: &str) -> Result<String, String> {
+    use std::process::{Command, Stdio};
+
+    let output = Command::new("sh")
+        .args(["-c", command])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("could not start it: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr: String = stderr.trim().chars().take(STDERR_LIMIT).collect();
+        return Err(format!("it exited with {}: {stderr}", output.status));
+    }
+    String::from_utf8(output.stdout).map_err(|_| "its output is not valid UTF-8".to_string())
 }
 
 /// One `@` with something on both sides. Good enough to catch typos.
@@ -245,7 +331,10 @@ password = "secret"
         assert_eq!(config.smtp.host, "smtp.gmail.com");
         assert_eq!(config.smtp.port, 465);
         assert_eq!(config.smtp.username, "you@gmail.com");
-        assert_eq!(config.smtp.password, "app password");
+        assert_eq!(
+            config.smtp.password,
+            PasswordSource::Plain("app password".into())
+        );
         assert_eq!(config.smtp.from, "sender@gmail.com");
         assert_eq!(config.smtp.security, Security::StartTls);
     }
@@ -276,7 +365,10 @@ password = "secret"
     fn env_password_overrides_the_file() {
         let config = Config::from_toml_str(FULL, Some("from env".into())).unwrap();
 
-        assert_eq!(config.smtp.password, "from env");
+        assert_eq!(
+            config.smtp.password,
+            PasswordSource::Plain("from env".into())
+        );
     }
 
     #[test]
@@ -285,7 +377,161 @@ password = "secret"
 
         let config = Config::from_toml_str(&text, Some("from env".into())).unwrap();
 
-        assert_eq!(config.smtp.password, "from env");
+        assert_eq!(
+            config.smtp.password,
+            PasswordSource::Plain("from env".into())
+        );
+    }
+
+    const WITH_COMMAND: &str = r#"
+kindle_email = "you_abc@kindle.com"
+
+[smtp]
+host = "smtp.example.com"
+port = 587
+username = "you@example.com"
+password_command = "bw get password x2k-gmail"
+"#;
+
+    #[test]
+    fn parses_a_password_command() {
+        let config = Config::from_toml_str(WITH_COMMAND, None).unwrap();
+
+        assert_eq!(
+            config.smtp.password,
+            PasswordSource::Command("bw get password x2k-gmail".to_string())
+        );
+    }
+
+    #[test]
+    fn the_file_password_wins_over_nothing_and_is_plain() {
+        let config = Config::from_toml_str(MINIMAL, None).unwrap();
+
+        assert_eq!(config.smtp.password, PasswordSource::Plain("secret".into()));
+    }
+
+    #[test]
+    fn env_password_wins_over_the_command() {
+        let config = Config::from_toml_str(WITH_COMMAND, Some("from env".into())).unwrap();
+
+        assert_eq!(
+            config.smtp.password,
+            PasswordSource::Plain("from env".to_string())
+        );
+    }
+
+    #[test]
+    fn password_and_password_command_together_are_invalid() {
+        let text = format!("{MINIMAL}password_command = \"echo hi\"\n");
+
+        let error = Config::from_toml_str(&text, None).unwrap_err();
+
+        assert!(matches!(
+            &error,
+            ConfigError::Invalid(message)
+                if message.contains("password") && message.contains("password_command")
+        ));
+    }
+
+    #[test]
+    fn an_empty_password_command_is_invalid() {
+        let text = WITH_COMMAND.replace("bw get password x2k-gmail", "  ");
+
+        assert!(matches!(
+            Config::from_toml_str(&text, None),
+            Err(ConfigError::Invalid(message)) if message.contains("password_command")
+        ));
+    }
+
+    #[test]
+    fn password_command_round_trips_without_a_plain_password() {
+        let config = Config::from_toml_str(WITH_COMMAND, None).unwrap();
+
+        let text = config.to_toml_string().unwrap();
+
+        assert!(text.contains("password_command"));
+        assert!(!text.contains("password = "));
+        assert_eq!(Config::from_toml_str(&text, None).unwrap(), config);
+    }
+
+    #[test]
+    fn resolve_returns_a_plain_password_without_running_anything() {
+        let never = |_: &str| -> Result<String, String> { panic!("must not run") };
+
+        let password = resolve_password(&PasswordSource::Plain("pw".into()), never).unwrap();
+
+        assert_eq!(password, "pw");
+    }
+
+    #[test]
+    fn resolve_runs_the_command_and_trims_only_trailing_newlines() {
+        let run = |command: &str| {
+            assert_eq!(command, "get-it");
+            Ok("  my app password \r\n".to_string())
+        };
+
+        let password = resolve_password(&PasswordSource::Command("get-it".into()), run).unwrap();
+
+        assert_eq!(password, "  my app password ");
+    }
+
+    #[test]
+    fn resolve_rejects_empty_output() {
+        let run = |_: &str| Ok("\r\n".to_string());
+
+        let error = resolve_password(&PasswordSource::Command("get-it".into()), run).unwrap_err();
+
+        assert!(matches!(&error, ConfigError::PasswordCommand(m) if m.contains("get-it")));
+    }
+
+    #[test]
+    fn resolve_error_has_the_command_the_reason_and_a_hint() {
+        let run = |_: &str| Err("exited with status 1: vault is locked".to_string());
+
+        let error = resolve_password(&PasswordSource::Command("bw get x".into()), run).unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("bw get x"));
+        assert!(message.contains("vault is locked"));
+        assert!(message.contains("bw unlock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_shell_command_returns_stdout() {
+        assert_eq!(run_shell_command("printf 'secret\\n'").unwrap(), "secret\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_shell_command_reports_the_exit_status() {
+        let reason = run_shell_command("exit 3").unwrap_err();
+
+        assert!(reason.contains('3'), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_shell_command_reports_stderr_but_never_stdout() {
+        let reason = run_shell_command("echo top-secret; echo oops >&2; exit 1").unwrap_err();
+
+        assert!(reason.contains("oops"), "{reason}");
+        assert!(!reason.contains("top-secret"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_shell_command_truncates_long_stderr() {
+        let reason =
+            run_shell_command("head -c 2000 /dev/zero | tr '\\0' x >&2; exit 1").unwrap_err();
+
+        assert!(reason.len() < 500, "{}", reason.len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_shell_command_does_not_read_stdin() {
+        assert_eq!(run_shell_command("cat").unwrap(), "");
     }
 
     #[test]
@@ -294,7 +540,9 @@ password = "secret"
 
         let error = Config::from_toml_str(&text, None).unwrap_err();
 
-        assert!(matches!(error, ConfigError::Invalid(message) if message.contains("password")));
+        assert!(
+            matches!(error, ConfigError::Invalid(message) if message.contains("password_command"))
+        );
     }
 
     #[test]

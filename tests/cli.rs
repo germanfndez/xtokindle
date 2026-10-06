@@ -60,6 +60,54 @@ fn missing_config_exits_with_5_before_touching_the_network() {
         .stderr(predicate::str::contains("x2k init"));
 }
 
+/// Writes a config whose password comes from `command`; returns the temp dir holding it.
+#[cfg(unix)]
+fn config_with_password_command(command: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let text = format!(
+        "kindle_email = \"you_abc@kindle.com\"\n\n[smtp]\nhost = \"127.0.0.1\"\nport = 2525\n\
+         username = \"you@example.com\"\npassword_command = \"{command}\"\n"
+    );
+    std::fs::write(&path, text).unwrap();
+    (dir, path)
+}
+
+#[cfg(unix)]
+#[test]
+fn failing_password_command_exits_with_5_before_touching_the_network() {
+    let (_dir, path) = config_with_password_command("echo locked >&2; exit 7");
+
+    x2k()
+        .env("X2K_CONFIG", &path)
+        .env_remove("X2K_SMTP_PASSWORD")
+        .arg(X_URL)
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("password_command"))
+        .stderr(predicate::str::contains("locked"));
+}
+
+#[cfg(unix)]
+#[test]
+fn failing_password_command_with_json_has_kind_config() {
+    let (_dir, path) = config_with_password_command("exit 7");
+
+    let output = x2k()
+        .env("X2K_CONFIG", &path)
+        .env_remove("X2K_SMTP_PASSWORD")
+        .args([X_URL, "--json"])
+        .assert()
+        .code(5)
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["kind"], "config");
+    assert!(json["message"].as_str().unwrap().contains("exit 7"));
+}
+
 #[test]
 #[ignore = "uses the network (FxTwitter and X image servers)"]
 fn live_dry_run_saves_an_epub() {

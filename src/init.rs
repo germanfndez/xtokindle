@@ -10,7 +10,8 @@ use dialoguer::{Confirm, Input, Password, Select};
 
 use crate::app::AppError;
 use crate::config::{
-    Config, ConfigError, Security, SmtpConfig, default_config_path, looks_like_email,
+    Config, ConfigError, PasswordSource, Security, SmtpConfig, default_config_path,
+    looks_like_email, resolve_password, run_shell_command,
 };
 
 const GMAIL_HOST: &str = "smtp.gmail.com";
@@ -33,7 +34,7 @@ pub enum Server {
 pub struct Answers {
     pub kindle_email: String,
     pub sender_email: String,
-    pub password: String,
+    pub password: PasswordSource,
     pub server: Server,
 }
 
@@ -55,7 +56,14 @@ pub fn build_config(answers: Answers) -> Result<Config, ConfigError> {
             host,
             port,
             username: sender.clone(),
-            password: answers.password.trim().to_string(),
+            password: match answers.password {
+                PasswordSource::Plain(password) => {
+                    PasswordSource::Plain(password.trim().to_string())
+                }
+                PasswordSource::Command(command) => {
+                    PasswordSource::Command(command.trim().to_string())
+                }
+            },
             from: sender,
             security,
         },
@@ -79,6 +87,27 @@ const SECURITY_CHOICES: [(&str, Security); 3] = [
     ("STARTTLS (usually port 587)", Security::StartTls),
     ("None (local testing only)", Security::None),
 ];
+
+/// Examples shown when the user chooses to run a password manager command.
+const PASSWORD_COMMAND_EXAMPLES: [&str; 3] = [
+    "bw get password x2k-gmail",
+    "op read \"op://Private/x2k/password\"",
+    "security find-generic-password -s x2k -w",
+];
+
+/// How the password is provided, as shown in the prompt (same order as the labels).
+const PASSWORD_CHOICES: [&str; 2] = [
+    "Store it in the config file",
+    "Run a password manager command",
+];
+
+/// What to tell the user after test-running a password command. Never includes the value.
+fn command_test_message(result: Result<String, ConfigError>) -> String {
+    match result {
+        Ok(_) => "The command worked.".to_string(),
+        Err(error) => format!("The command failed (you can still save it): {error}"),
+    }
+}
 
 /// Which security option to preselect for a port.
 fn default_security_index(port: u16) -> usize {
@@ -131,10 +160,7 @@ pub fn run() -> Result<String, AppError> {
         ask_custom_server(&theme)?
     };
 
-    let password = Password::with_theme(&theme)
-        .with_prompt("SMTP password (hidden)")
-        .interact()
-        .map_err(prompt_error)?;
+    let password = ask_password(&theme)?;
 
     let config = build_config(Answers {
         kindle_email,
@@ -144,6 +170,40 @@ pub fn run() -> Result<String, AppError> {
     })?;
     config.save(&path)?;
     Ok(next_steps(&path, &config.smtp.from))
+}
+
+fn ask_password(theme: &ColorfulTheme) -> Result<PasswordSource, AppError> {
+    let choice = Select::with_theme(theme)
+        .with_prompt("How should x2k get the SMTP password?")
+        .items(PASSWORD_CHOICES)
+        .default(0)
+        .interact()
+        .map_err(prompt_error)?;
+    if choice == 0 {
+        let password = Password::with_theme(theme)
+            .with_prompt("SMTP password (hidden)")
+            .interact()
+            .map_err(prompt_error)?;
+        return Ok(PasswordSource::Plain(password));
+    }
+
+    println!("The command must print the password. Examples:");
+    for example in PASSWORD_COMMAND_EXAMPLES {
+        println!("  {example}");
+    }
+    let command: String = Input::with_theme(theme)
+        .with_prompt("Password command")
+        .interact_text()
+        .map_err(prompt_error)?;
+    let source = PasswordSource::Command(command.trim().to_string());
+
+    if confirm(theme, "Run it now to check that it works?", true)? {
+        println!(
+            "{}",
+            command_test_message(resolve_password(&source, run_shell_command))
+        );
+    }
+    Ok(source)
 }
 
 fn ask_email(theme: &ColorfulTheme, prompt: &str) -> Result<String, AppError> {
@@ -201,7 +261,7 @@ mod tests {
         Answers {
             kindle_email: "me_123@kindle.com".to_string(),
             sender_email: "me@gmail.com".to_string(),
-            password: "abcd efgh ijkl mnop".to_string(),
+            password: PasswordSource::Plain("abcd efgh ijkl mnop".to_string()),
             server: Server::Gmail,
         }
     }
@@ -216,7 +276,10 @@ mod tests {
         assert_eq!(config.smtp.security, Security::Tls);
         assert_eq!(config.smtp.username, "me@gmail.com");
         assert_eq!(config.smtp.from, "me@gmail.com");
-        assert_eq!(config.smtp.password, "abcd efgh ijkl mnop");
+        assert_eq!(
+            config.smtp.password,
+            PasswordSource::Plain("abcd efgh ijkl mnop".to_string())
+        );
     }
 
     #[test]
@@ -242,7 +305,7 @@ mod tests {
         let answers = Answers {
             kindle_email: "  me_123@kindle.com ".to_string(),
             sender_email: " me@gmail.com\n".to_string(),
-            password: " secret ".to_string(),
+            password: PasswordSource::Plain(" secret ".to_string()),
             ..gmail_answers()
         };
 
@@ -250,7 +313,7 @@ mod tests {
 
         assert_eq!(config.kindle_email, "me_123@kindle.com");
         assert_eq!(config.smtp.username, "me@gmail.com");
-        assert_eq!(config.smtp.password, "secret");
+        assert_eq!(config.smtp.password, PasswordSource::Plain("secret".into()));
     }
 
     #[test]
@@ -269,7 +332,7 @@ mod tests {
     #[test]
     fn rejects_an_empty_password() {
         let answers = Answers {
-            password: "   ".to_string(),
+            password: PasswordSource::Plain("   ".to_string()),
             ..gmail_answers()
         };
 
@@ -277,6 +340,47 @@ mod tests {
             build_config(answers),
             Err(ConfigError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn a_password_command_is_kept_instead_of_a_password() {
+        let answers = Answers {
+            password: PasswordSource::Command(" bw get password x2k-gmail ".to_string()),
+            ..gmail_answers()
+        };
+
+        let config = build_config(answers).unwrap();
+
+        assert_eq!(
+            config.smtp.password,
+            PasswordSource::Command("bw get password x2k-gmail".to_string())
+        );
+        let text = config.to_toml_string().unwrap();
+        assert!(text.contains("password_command = \"bw get password x2k-gmail\""));
+    }
+
+    #[test]
+    fn rejects_an_empty_password_command() {
+        let answers = Answers {
+            password: PasswordSource::Command("  ".to_string()),
+            ..gmail_answers()
+        };
+
+        assert!(matches!(
+            build_config(answers),
+            Err(ConfigError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn command_test_message_never_shows_the_password() {
+        assert_eq!(
+            command_test_message(Ok("hunter2".to_string())),
+            "The command worked."
+        );
+
+        let failed = command_test_message(Err(ConfigError::PasswordCommand("boom".into())));
+        assert!(failed.contains("boom"));
     }
 
     #[test]
