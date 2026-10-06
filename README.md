@@ -119,6 +119,9 @@ password_command = "bw get password x2k-gmail"
 | macOS Keychain | `security find-generic-password -s x2k -w` |
 | pass | `pass show x2k/gmail` |
 
+Using Bitwarden? Follow the step-by-step guide in [docs/bitwarden.md](docs/bitwarden.md),
+including a shell function that unlocks the vault automatically.
+
 Rules:
 
 - The vault must be unlocked first, or the command fails (exit code 5). With
