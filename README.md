@@ -137,7 +137,8 @@ Rules:
    [FxTwitter](https://github.com/FxEmbed/FxEmbed) API (`api.fxtwitter.com`),
    so x2k depends on that service being up and keeping its response format.
 2. The article is converted to a small internal model (title, author, blocks).
-3. Images are downloaded and embedded, and an EPUB is built.
+3. Images are downloaded and embedded, and an EPUB is built. Wide covers are
+   letterboxed into a 1600x2560 portrait cover so Kindle doesn't crop them.
 4. The EPUB is emailed over SMTP to your Kindle address.
 
 ## Adding a new source
