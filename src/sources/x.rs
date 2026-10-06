@@ -112,7 +112,7 @@ fn http_get(api_url: &str) -> Result<String, String> {
 
 #[derive(Deserialize)]
 struct Response {
-    tweet: Tweet,
+    tweet: Option<Tweet>,
 }
 
 #[derive(Deserialize)]
@@ -213,9 +213,15 @@ type Entities<'a> = HashMap<&'a str, &'a Entity>;
 
 /// Converts a FxTwitter JSON response into an `Article`.
 pub fn parse_response(json: &str, url: &str) -> Result<Article, SourceError> {
-    let response: Response =
-        serde_json::from_str(json).map_err(|e| SourceError::Parse(e.to_string()))?;
-    let tweet = response.tweet;
+    // FxTwitter answers missing posts with an HTML page or a JSON body without `tweet`.
+    let not_found = || {
+        SourceError::Parse(
+            "could not find this post (it may not exist, be private, or FxTwitter may be down)"
+                .to_string(),
+        )
+    };
+    let response: Response = serde_json::from_str(json).map_err(|_| not_found())?;
+    let tweet = response.tweet.ok_or_else(not_found)?;
     let article = tweet
         .article
         .ok_or_else(|| SourceError::Parse("this post is not an X Article".to_string()))?;
@@ -525,6 +531,28 @@ mod tests {
             parse_response("nope", URL),
             Err(SourceError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn html_page_instead_of_json_means_post_not_found() {
+        let html = "<!DOCTYPE html><html><body>FxTwitter</body></html>";
+
+        let result = parse_response(html, URL);
+
+        assert!(
+            matches!(result, Err(SourceError::Parse(msg)) if msg.contains("could not find this post"))
+        );
+    }
+
+    #[test]
+    fn json_without_tweet_means_post_not_found() {
+        let json = r#"{"code":404,"message":"NOT_FOUND"}"#;
+
+        let result = parse_response(json, URL);
+
+        assert!(
+            matches!(result, Err(SourceError::Parse(msg)) if msg.contains("could not find this post"))
+        );
     }
 
     /// Builds a minimal FxTwitter response whose article holds the given blocks JSON.

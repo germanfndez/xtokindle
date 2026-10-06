@@ -139,7 +139,8 @@ impl Config {
         Ok(config)
     }
 
-    fn validate(&self) -> Result<(), ConfigError> {
+    /// Checks the values that would make sending fail later (bad emails, no password, port 0).
+    pub fn validate(&self) -> Result<(), ConfigError> {
         let invalid = |message: &str| Err(ConfigError::Invalid(message.to_string()));
 
         if !looks_like_email(&self.kindle_email) {
@@ -180,7 +181,7 @@ impl Config {
 }
 
 /// One `@` with something on both sides. Good enough to catch typos.
-fn looks_like_email(value: &str) -> bool {
+pub fn looks_like_email(value: &str) -> bool {
     let mut parts = value.split('@');
     matches!(
         (parts.next(), parts.next(), parts.next()),
