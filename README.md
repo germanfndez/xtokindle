@@ -24,7 +24,8 @@ cargo install --git https://github.com/germanfndez/xtokindle
    server works too.
 2. **Run `x2k init`.** It asks for your Kindle address (Amazon > Manage Your
    Content and Devices > Preferences > Personal Document Settings), your sender
-   email and the app password, then writes the config file.
+   email and the app password (or a password manager command, see
+   [Password managers](#password-managers)), then writes the config file.
 3. **Approve the sender in Amazon.** Add your sender email to Amazon > Manage
    Your Content and Devices > Preferences > Personal Document Settings >
    Approved Personal Document E-mail List. Without this, Amazon silently drops
@@ -89,7 +90,7 @@ kindle_email = "you_123@kindle.com"
 host = "smtp.gmail.com"
 port = 465
 username = "you@gmail.com"
-password = "app password"
+password = "app password"            # or use password_command instead (see below)
 from = "you@gmail.com"   # optional, defaults to username
 security = "tls"         # optional: "tls", "starttls" or "none"; defaults to tls on 465, else starttls
 ```
@@ -98,7 +99,37 @@ security = "tls"         # optional: "tls", "starttls" or "none"; defaults to tl
 | -------- | ------ |
 | `X2K_CONFIG` | Use this config file path instead of the default |
 | `XDG_CONFIG_HOME` | Config lives in `$XDG_CONFIG_HOME/x2k/config.toml` |
-| `X2K_SMTP_PASSWORD` | Overrides the password in the file (so it can stay out of it) |
+| `X2K_SMTP_PASSWORD` | Overrides `password` and `password_command` (so the password can stay out of the file) |
+
+### Password managers
+
+Instead of writing the password in the file, set `password_command` in `[smtp]`.
+x2k runs it with `sh -c` and uses what it prints (trailing newlines are removed;
+spaces are kept).
+
+```toml
+[smtp]
+password_command = "bw get password x2k-gmail"
+```
+
+| Password manager | `password_command` |
+| ---------------- | ------------------ |
+| Bitwarden | `bw get password x2k-gmail` |
+| 1Password | `op read "op://Private/x2k/password"` |
+| macOS Keychain | `security find-generic-password -s x2k -w` |
+| pass | `pass show x2k/gmail` |
+
+Rules:
+
+- The vault must be unlocked first, or the command fails (exit code 5). With
+  Bitwarden: `export BW_SESSION=$(bw unlock --raw)`.
+- Precedence: `X2K_SMTP_PASSWORD` (if not empty), then `password`, then
+  `password_command`. Setting both `password` and `password_command` in the file
+  is an error.
+- The command runs before the article is fetched, so a locked vault fails fast.
+  `--dry-run` never runs it.
+- Its output is never printed. On failure, x2k shows the command, its exit status
+  and its error output.
 
 ## How it works
 
